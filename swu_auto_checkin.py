@@ -15,15 +15,15 @@ def get_swu_token(username: str, password: str, headless: bool = True) -> str:
     """登录并获取 access_token，支持自动重试验证码"""
     co = ChromiumOptions()
     if headless:
-        co.headless = True          # 兼容所有 DrissionPage 4.x 版本
+        co.headless = True
         co.set_argument('--window-size=1920,1080')
-        # 如果 GitHub Actions 中自动安装了 Chrome，通常不需要手动指定路径
-        # 但本地运行时如果找不到浏览器，可以取消注释下一行并填写你自己的 Chrome 路径
-        # co.set_browser_path(r'C:\Program Files\Google\Chrome\Application\chrome.exe')
-    # ... 后面代码不变
-    # 如果有 CHROME_PATH 环境变量，DrissionPage 会自动使用，不必手动指定
+        # ✅ 新增：修复 Linux 环境下浏览器连接失败的问题
+        co.set_argument('--no-sandbox')
+        co.set_argument('--disable-dev-shm-usage')
 
     last_exception = None
+    file_path = None   # ✅ 修复：提前定义，避免 finally 中引用未定义变量
+
     for attempt in range(1, MAX_RETRY + 1):
         dp = None
         try:
@@ -64,7 +64,6 @@ def get_swu_token(username: str, password: str, headless: bool = True) -> str:
             captcha_input = dp.ele('@class=dfinput', timeout=3)
             captcha_input.clear()
             dp.actions.click(captcha_input).type(result)
-            # 触发前端事件
             dp.run_js('''
                 var el = arguments[0];
                 el.dispatchEvent(new Event('input', { bubbles: true }));
@@ -79,31 +78,27 @@ def get_swu_token(username: str, password: str, headless: bool = True) -> str:
                 login_btn = dp.ele('.btn.btn-default.blue', timeout=5)
             login_btn.click()
 
-            # 等待页面跳转
             print("等待页面跳转加载...")
             time.sleep(8)
 
-            # 获取 token
             print("等待登录完成并获取 token...")
             for _ in range(30):
                 time.sleep(1)
                 try:
                     token = dp.run_js('return localStorage.getItem("access_token") || sessionStorage.getItem("access_token")')
                     if token:
-                        return token  # 成功，返回前会执行 finally 清理
+                        return token
                 except Exception as e:
                     print(f"读取 token 时异常: {e}，继续等待...")
 
-                # 检查验证码错误提示
                 try:
                     err = dp.ele('#err', timeout=0.2)
                     if err and ('验证码错误' in err.text or '验证码不正确' in err.text):
                         print("验证码错误，准备重试...")
-                        break  # 跳出 token 等待循环，进入下一次 attempt
+                        break
                 except:
                     pass
             else:
-                # 如果 30 次循环没 break（没发现验证码错误且没拿到 token），超时
                 raise Exception("获取 token 超时，可能登录失败")
         except Exception as e:
             last_exception = e
@@ -113,8 +108,8 @@ def get_swu_token(username: str, password: str, headless: bool = True) -> str:
         finally:
             if dp:
                 dp.quit()
-            # 清理临时验证码图片（无论成功或失败）
-            if os.path.exists(file_path):
+            # ✅ 修复：清理临时文件前先判断 file_path 是否已赋值
+            if file_path and os.path.exists(file_path):
                 os.remove(file_path)
                 try:
                     os.rmdir('images')

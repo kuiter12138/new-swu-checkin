@@ -15,14 +15,20 @@ def get_swu_token(username: str, password: str, headless: bool = True) -> str:
     """登录并获取 access_token，支持自动重试验证码"""
     co = ChromiumOptions()
     if headless:
-        co.headless = True
-        co.set_argument('--window-size=1920,1080')
-        # ✅ 新增：修复 Linux 环境下浏览器连接失败的问题
+        # 新版无头模式 + Linux 必须的参数
+        co.set_argument('--headless=new')      # 关键：使用新版无头模式
         co.set_argument('--no-sandbox')
         co.set_argument('--disable-dev-shm-usage')
+        co.set_argument('--disable-gpu')
+        co.set_argument('--window-size=1920,1080')
+        # 使用临时目录避免冲突
+        import tempfile
+        user_data_dir = tempfile.mkdtemp()
+        co.set_user_data_path(user_data_dir)
+        # co.headless = True   # 这行可保留也可删除，因为已用 --headless=new
 
     last_exception = None
-    file_path = None   # ✅ 修复：提前定义，避免 finally 中引用未定义变量
+    file_path = None
 
     for attempt in range(1, MAX_RETRY + 1):
         dp = None
@@ -108,7 +114,6 @@ def get_swu_token(username: str, password: str, headless: bool = True) -> str:
         finally:
             if dp:
                 dp.quit()
-            # ✅ 修复：清理临时文件前先判断 file_path 是否已赋值
             if file_path and os.path.exists(file_path):
                 os.remove(file_path)
                 try:

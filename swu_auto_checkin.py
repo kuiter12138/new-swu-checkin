@@ -12,6 +12,7 @@ from DrissionPage import ChromiumPage, ChromiumOptions
 MAX_RETRY = 3
 
 def get_swu_token(username: str, password: str, headless: bool = True) -> str:
+    """登录并获取 access_token，支持自动重试验证码"""
     co = ChromiumOptions()
     
     # 使用环境变量指定的浏览器路径（Actions 中由 setup-chrome 提供）
@@ -20,21 +21,11 @@ def get_swu_token(username: str, password: str, headless: bool = True) -> str:
         co.set_browser_path(chrome_path)
     
     if headless:
-        co.headless = True                     # 使用 DrissionPage 自带的无头模式
+        co.headless = True
         co.set_argument('--no-sandbox')
         co.set_argument('--disable-dev-shm-usage')
         co.set_argument('--disable-gpu')
         co.set_argument('--window-size=1920,1080')
-        # 注意：不再手动添加 --headless=new，避免冲突
-
-    last_exception = None
-    file_path = None
-    # ... 后面不变（从 for attempt in range... 开始）
-        # 使用临时目录避免冲突
-        import tempfile
-        user_data_dir = tempfile.mkdtemp()
-        co.set_user_data_path(user_data_dir)
-        # co.headless = True   # 这行可保留也可删除，因为已用 --headless=new
 
     last_exception = None
     file_path = None
@@ -131,7 +122,6 @@ def get_swu_token(username: str, password: str, headless: bool = True) -> str:
                     pass
 
     raise Exception(f"所有重试均失败，最后错误: {last_exception}")
-
 
 def get_transition_today(token: str):
     url = "https://of.swu.edu.cn/gateway/fighter-baida/api/cqtj/getTransitionByToday"

@@ -12,13 +12,17 @@ from DrissionPage import ChromiumPage, ChromiumOptions
 MAX_RETRY = 3
 
 def get_swu_token(username: str, password: str, headless: bool = True) -> str:
-    """登录并获取 access_token，支持自动重试验证码"""
     co = ChromiumOptions()
     
-    # 使用环境变量指定的浏览器路径（Actions 中由 setup-chrome 提供）
+    # 使用环境变量指定的浏览器路径
     chrome_path = os.environ.get("CHROME_PATH")
     if chrome_path:
         co.set_browser_path(chrome_path)
+    
+    # 关键修复：自动寻找可用端口 + 临时用户目录
+    co.auto_port()                              # 自动避开 9222 等占用端口
+    import tempfile
+    co.set_user_data_path(tempfile.mkdtemp())   # 使用临时目录，避免冲突
     
     if headless:
         co.headless = True

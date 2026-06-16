@@ -5,7 +5,6 @@ import os
 import time
 import json
 import tempfile
-import traceback
 import ddddocr
 import requests
 from DrissionPage import ChromiumPage, ChromiumOptions
@@ -13,21 +12,25 @@ from DrissionPage import ChromiumPage, ChromiumOptions
 MAX_RETRY = 3
 
 def get_swu_token(username: str, password: str, headless: bool = True) -> str:
-    """DrissionPage 登录，已修复验证码事件触发，适配 GitHub Actions"""
+    """DrissionPage 登录，使用 Chrome 115，适配 GitHub Actions"""
     co = ChromiumOptions()
 
     is_ci = os.environ.get('GITHUB_ACTIONS') == 'true'
     if is_ci:
+        # 使用 GitHub Actions 安装的 Chrome 115 路径
         chrome_path = os.environ.get('CHROME_PATH')
         if chrome_path:
             co.set_browser_path(chrome_path)
+        # Linux 无头必要参数（Chrome 115 不需要 --headless=new）
         co.set_argument('--no-sandbox')
         co.set_argument('--disable-dev-shm-usage')
         co.set_argument('--disable-gpu')
         co.set_argument('--disable-setuid-sandbox')
         co.set_argument('--window-size=1920,1080')
-        co.set_argument('--headless=new')
+        co.headless = True   # Chrome 115 用传统无头模式即可
+        # 自动分配可用端口，避免 9222 冲突
         co.auto_port()
+        # 使用临时用户目录
         co.set_user_data_path(tempfile.mkdtemp())
     else:
         co.headless = headless
@@ -90,13 +93,13 @@ def get_swu_token(username: str, password: str, headless: bool = True) -> str:
             result = ocr.classification(image_bytes)
             print(f"[尝试 {attempt}/{MAX_RETRY}] 识别验证码: {result}")
 
-            # 4. 输入验证码（**关键：必须触发前端事件**）
+            # 4. 输入验证码（**关键：触发前端事件**）
             captcha_input = dp.ele('@class=dfinput', timeout=3)
             if not captcha_input:
                 captcha_input = dp.eles('tag=input@@type=text')[-1]
             captcha_input.clear()
             dp.actions.click(captcha_input).type(result)
-            # 触发 input / change / blur 事件，确保页面感知验证码已填写
+            # 触发 input / change / blur 事件
             dp.run_js('''
                 var el = arguments[0];
                 el.dispatchEvent(new Event('input', { bubbles: true }));
@@ -142,7 +145,6 @@ def get_swu_token(username: str, password: str, headless: bool = True) -> str:
         except Exception as e:
             last_exception = e
             print(f"第 {attempt} 次尝试失败: {e}")
-            traceback.print_exc()
             if attempt < MAX_RETRY:
                 time.sleep(2)
         finally:

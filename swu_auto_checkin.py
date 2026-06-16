@@ -5,6 +5,7 @@ import os
 import time
 import json
 import tempfile
+import traceback
 import ddddocr
 import requests
 from DrissionPage import ChromiumPage, ChromiumOptions
@@ -12,29 +13,23 @@ from DrissionPage import ChromiumPage, ChromiumOptions
 MAX_RETRY = 3
 
 def get_swu_token(username: str, password: str, headless: bool = True) -> str:
-    """DrissionPage 登录，适配 GitHub Actions（Chrome 115 + 特定参数）"""
+    """DrissionPage 登录，已修复验证码事件触发，适配 GitHub Actions"""
     co = ChromiumOptions()
 
     is_ci = os.environ.get('GITHUB_ACTIONS') == 'true'
     if is_ci:
-        # 使用 GitHub Actions 安装的 Chrome 115
         chrome_path = os.environ.get('CHROME_PATH')
         if chrome_path:
             co.set_browser_path(chrome_path)
-        # Linux 无头关键参数
         co.set_argument('--no-sandbox')
         co.set_argument('--disable-dev-shm-usage')
         co.set_argument('--disable-gpu')
         co.set_argument('--disable-setuid-sandbox')
         co.set_argument('--window-size=1920,1080')
-        # 必须使用 --headless=new，这是 DrissionPage 4.1.1.4 在 Linux 下需要的
         co.set_argument('--headless=new')
-        # 自动分配可用端口
         co.auto_port()
-        # 使用临时用户目录，防止冲突
         co.set_user_data_path(tempfile.mkdtemp())
     else:
-        # 本地 Windows 保持您原有的设置
         co.headless = headless
         co.set_argument('--window-size=1920,1080')
 
@@ -53,28 +48,32 @@ def get_swu_token(username: str, password: str, headless: bool = True) -> str:
             )
             dp.get(login_url)
 
-            # 1. 点击统一身份认证按钮（两种定位方式）
-            unified_btn = dp.ele('@src=img/unified_button.png', timeout=5)
+            # 1. 点击统一身份认证按钮
+            unified_btn = dp.ele('#loginTypeBox div[onclick="_goLogin()"]', timeout=5)
             if not unified_btn:
-                unified_btn = dp.ele('div[onclick="_goLogin()"]', timeout=5)
+                unified_btn = dp.ele('@src=img/unified_button.png', timeout=5)
             if unified_btn:
                 unified_btn.click()
                 time.sleep(2)
 
-            # 2. 输入账号密码（原逻辑：class=hd 索引，失败则用 id）
-            try:
+            # 2. 输入账号密码（优先 id，备用 class 索引）
+            username_input = dp.ele('#loginName', timeout=5)
+            if not username_input:
                 username_input = dp.ele('@class=hd', index=1, timeout=5)
+            password_input = dp.ele('#password', timeout=5)
+            if not password_input:
                 password_input = dp.ele('@class=hd', index=2, timeout=5)
-            except Exception:
-                username_input = dp.ele('#loginName', timeout=5)
-                password_input = dp.ele('#password', timeout=5)
+            if not username_input or not password_input:
+                raise Exception("未找到用户名或密码输入框")
 
-            username_input.clear().input(username)
-            password_input.clear().input(password)
+            username_input.clear()
+            username_input.input(username)
+            password_input.clear()
+            password_input.input(password)
 
             # 3. 验证码处理
             os.makedirs('images', exist_ok=True)
-            img = dp.ele('@id=kaptchaImage', timeout=5)
+            img = dp.ele('#kaptchaImage', timeout=5)
             if not img:
                 img = dp.ele('@src=validate', timeout=5)
             if not img:
@@ -91,12 +90,13 @@ def get_swu_token(username: str, password: str, headless: bool = True) -> str:
             result = ocr.classification(image_bytes)
             print(f"[尝试 {attempt}/{MAX_RETRY}] 识别验证码: {result}")
 
-            # 4. 输入验证码
+            # 4. 输入验证码（**关键：必须触发前端事件**）
             captcha_input = dp.ele('@class=dfinput', timeout=3)
             if not captcha_input:
                 captcha_input = dp.eles('tag=input@@type=text')[-1]
             captcha_input.clear()
             dp.actions.click(captcha_input).type(result)
+            # 触发 input / change / blur 事件，确保页面感知验证码已填写
             dp.run_js('''
                 var el = arguments[0];
                 el.dispatchEvent(new Event('input', { bubbles: true }));
@@ -111,11 +111,14 @@ def get_swu_token(username: str, password: str, headless: bool = True) -> str:
                 login_btn = dp.ele('.btn.btn-default.blue', timeout=5)
             if not login_btn:
                 login_btn = dp.ele('tag=input@@type=submit', timeout=5)
+            if not login_btn:
+                raise Exception("未找到登录按钮")
             login_btn.click()
 
             print("等待页面跳转加载...")
             time.sleep(8)
 
+            # 6. 获取 token
             print("等待登录完成并获取 token...")
             for _ in range(30):
                 time.sleep(1)
@@ -126,20 +129,20 @@ def get_swu_token(username: str, password: str, headless: bool = True) -> str:
                     if token:
                         return token
                 except Exception as e:
-                    print(f"读取 token 时异常: {e}，继续等待...")
+                    print(f"读取 token 时异常: {e}")
 
-                try:
-                    err = dp.ele('#err', timeout=0.2)
-                    if err and ('验证码错误' in err.text or '验证码不正确' in err.text):
-                        print("验证码错误，准备重试...")
-                        break
-                except:
-                    pass
+                # 检查验证码错误提示
+                err = dp.ele('#err', timeout=0.2)
+                if err and ('验证码错误' in err.text or '验证码不正确' in err.text):
+                    print("验证码错误，准备重试...")
+                    break
             else:
                 raise Exception("获取 token 超时，可能登录失败")
+
         except Exception as e:
             last_exception = e
             print(f"第 {attempt} 次尝试失败: {e}")
+            traceback.print_exc()
             if attempt < MAX_RETRY:
                 time.sleep(2)
         finally:

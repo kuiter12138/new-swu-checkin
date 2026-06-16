@@ -2,6 +2,7 @@ name: SWU Daily Checkin
 
 on:
   schedule:
+    # 北京时间 21:30 -> UTC 13:30
     - cron: '30 13 * * *'
   workflow_dispatch:
 
@@ -12,12 +13,6 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Setup Chrome
-        id: setup-chrome
-        uses: browser-actions/setup-chrome@v1
-        with:
-          chrome-version: '115'   # 关键：使用兼容的版本
-
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -26,10 +21,10 @@ jobs:
       - name: Install dependencies
         run: |
           pip install -r requirements.txt
+          playwright install chromium
 
       - name: Run checkin script
         env:
           SWU_USERNAME: ${{ secrets.SWU_USERNAME }}
           SWU_PASSWORD: ${{ secrets.SWU_PASSWORD }}
-          CHROME_PATH: ${{ steps.setup-chrome.outputs.chrome-path }}
         run: python swu_auto_checkin.py

@@ -7,18 +7,27 @@ import json
 import subprocess
 import tempfile
 import re
+import signal
 import ddddocr
 import requests
 from DrissionPage import ChromiumPage, ChromiumOptions
 
 MAX_RETRY = 3
 
+def _cleanup_chrome_processes():
+    """杀掉所有残留的 Chrome 进程，释放端口"""
+    try:
+        subprocess.run(['pkill', '-f', 'chrome'], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        time.sleep(1)  # 等待进程完全退出
+    except:
+        pass
+
 def _start_chrome_and_get_debug_url() -> str:
-    """手动启动 Chrome 并返回 DevTools 调试地址"""
+    """手动启动 Chrome 并返回 IPv4 调试地址"""
     chrome_path = os.environ.get('CHROME_PATH', 'google-chrome')
     user_data_dir = tempfile.mkdtemp()
     
-    # 选择一个固定端口，避免冲突
+    # 固定端口，并强制使用 IPv4 地址
     debug_port = 9222
     cmd = [
         chrome_path,
@@ -28,22 +37,24 @@ def _start_chrome_and_get_debug_url() -> str:
         '--disable-dev-shm-usage',
         '--disable-gpu',
         '--disable-setuid-sandbox',
-        '--headless=new',  # 新版无头模式，兼容 GitHub Actions
+        '--headless=new',
         '--window-size=1920,1080',
         '--disable-blink-features=AutomationControlled',
+        '--remote-debugging-address=127.0.0.1',  # 关键：强制 IPv4
         'about:blank'
     ]
-    # 启动浏览器，捕获 stderr，因为 DevTools 监听地址通常输出到 stderr
     proc = subprocess.Popen(cmd, stderr=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
-    # 等待输出调试地址（最多 10 秒）
+    
+    # 读取 stderr 获取调试地址
     start_time = time.time()
     debug_url = None
     while time.time() - start_time < 10:
         line = proc.stderr.readline()
         if not line:
+            if proc.poll() is not None:
+                break
             time.sleep(0.1)
             continue
-        # 查找 DevTools listening on ws://... 行
         match = re.search(r'DevTools listening on (ws://\S+)', line)
         if match:
             debug_url = match.group(1)
@@ -54,25 +65,24 @@ def _start_chrome_and_get_debug_url() -> str:
     return debug_url
 
 def get_swu_token(username: str, password: str) -> str:
-    """DrissionPage 登录，通过手动启动浏览器绕过地址解析错误"""
+    """DrissionPage 登录，手动管理浏览器进程"""
     last_exception = None
     file_path = None
     for attempt in range(1, MAX_RETRY + 1):
         dp = None
-        browser_proc = None
         try:
-            # 手动启动浏览器并获取调试地址
+            # 清理残留进程
+            _cleanup_chrome_processes()
+            # 启动 Chrome 并获取地址
             debug_url = _start_chrome_and_get_debug_url()
             print(f"Chrome 调试地址: {debug_url}")
-
-            # 配置 DrissionPage 连接该地址
-            co = ChromiumOptions()
-            co.set_browser_path(os.environ.get('CHROME_PATH'))  # 实际上已不需要，但保留以防万一
-            # 关键：直接设置地址，让 DrissionPage 连接已有浏览器
-            co.set_address(debug_url.replace('ws://', '').replace('/devtools/browser', ''))
-            # 注意：set_address 期望 'ip:port' 格式
+            # 解析地址：ws://127.0.0.1:9222/devtools/browser/xxx -> 127.0.0.1:9222
             address = debug_url.replace('ws://', '').split('/')[0]  # 得到 '127.0.0.1:9222'
+            
+            co = ChromiumOptions()
             co.set_address(address)
+            # 不设置 browser_path，因为浏览器已启动
+            co.headless = False  # 表示已连接，不需要自动启动
 
             dp = ChromiumPage(co)
             login_url = (
@@ -174,6 +184,8 @@ def get_swu_token(username: str, password: str) -> str:
         finally:
             if dp:
                 dp.quit()
+            # 清理 Chrome 进程
+            _cleanup_chrome_processes()
             if file_path and os.path.exists(file_path):
                 os.remove(file_path)
                 try:

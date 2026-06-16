@@ -7,31 +7,18 @@ import json
 import subprocess
 import tempfile
 import re
-import signal
 import ddddocr
 import requests
 from DrissionPage import ChromiumPage, ChromiumOptions
 
 MAX_RETRY = 3
 
-def _cleanup_chrome_processes():
-    """杀掉所有残留的 Chrome 进程，释放端口"""
-    try:
-        subprocess.run(['pkill', '-f', 'chrome'], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        time.sleep(1)  # 等待进程完全退出
-    except:
-        pass
-
-def _start_chrome_and_get_debug_url() -> str:
-    """手动启动 Chrome 并返回 IPv4 调试地址"""
+def _start_chrome_and_get_port(user_data_dir: str) -> int:
+    """启动 Chrome 并返回实际调试端口（通过 DevToolsActivePort 文件）"""
     chrome_path = os.environ.get('CHROME_PATH', 'google-chrome')
-    user_data_dir = tempfile.mkdtemp()
-    
-    # 固定端口，并强制使用 IPv4 地址
-    debug_port = 9222
     cmd = [
         chrome_path,
-        f'--remote-debugging-port={debug_port}',
+        '--remote-debugging-port=0',          # 随机端口
         f'--user-data-dir={user_data_dir}',
         '--no-sandbox',
         '--disable-dev-shm-usage',
@@ -40,49 +27,41 @@ def _start_chrome_and_get_debug_url() -> str:
         '--headless=new',
         '--window-size=1920,1080',
         '--disable-blink-features=AutomationControlled',
-        '--remote-debugging-address=127.0.0.1',  # 关键：强制 IPv4
         'about:blank'
     ]
-    proc = subprocess.Popen(cmd, stderr=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
-    
-    # 读取 stderr 获取调试地址
+    proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    # 等待 DevToolsActivePort 文件出现（最多 10 秒）
+    port_file = os.path.join(user_data_dir, 'DevToolsActivePort')
     start_time = time.time()
-    debug_url = None
     while time.time() - start_time < 10:
-        line = proc.stderr.readline()
-        if not line:
-            if proc.poll() is not None:
-                break
-            time.sleep(0.1)
-            continue
-        match = re.search(r'DevTools listening on (ws://\S+)', line)
-        if match:
-            debug_url = match.group(1)
-            break
-    if not debug_url:
-        proc.kill()
-        raise Exception("无法获取 Chrome DevTools 调试地址")
-    return debug_url
+        if os.path.exists(port_file):
+            with open(port_file, 'r') as f:
+                lines = f.read().strip().split('\n')
+                if len(lines) >= 1:
+                    return int(lines[0])  # 第一行是端口号
+        time.sleep(0.5)
+    proc.kill()
+    raise Exception("无法获取 Chrome 调试端口")
 
 def get_swu_token(username: str, password: str) -> str:
-    """DrissionPage 登录，手动管理浏览器进程"""
+    """DrissionPage 登录，通过随机端口连接浏览器"""
     last_exception = None
     file_path = None
     for attempt in range(1, MAX_RETRY + 1):
         dp = None
+        user_data_dir = tempfile.mkdtemp()
         try:
-            # 清理残留进程
-            _cleanup_chrome_processes()
-            # 启动 Chrome 并获取地址
-            debug_url = _start_chrome_and_get_debug_url()
-            print(f"Chrome 调试地址: {debug_url}")
-            # 解析地址：ws://127.0.0.1:9222/devtools/browser/xxx -> 127.0.0.1:9222
-            address = debug_url.replace('ws://', '').split('/')[0]  # 得到 '127.0.0.1:9222'
-            
+            port = _start_chrome_and_get_port(user_data_dir)
+            print(f"Chrome 调试端口: {port}")
+
             co = ChromiumOptions()
-            co.set_address(address)
-            # 不设置 browser_path，因为浏览器已启动
-            co.headless = False  # 表示已连接，不需要自动启动
+            co.set_local_port(port)  # 使用实际端口
+            co.set_user_data_path(user_data_dir)
+            co.headless = False      # 已连接，不自动启动
+            co.set_argument('--no-sandbox')
+            co.set_argument('--disable-dev-shm-usage')
+            co.set_argument('--disable-gpu')
+            co.set_argument('--window-size=1920,1080')
 
             dp = ChromiumPage(co)
             login_url = (
@@ -94,7 +73,7 @@ def get_swu_token(username: str, password: str) -> str:
             )
             dp.get(login_url)
 
-            # 1. 点击统一身份认证按钮
+            # 1. 点击统一身份认证
             unified_btn = dp.ele('#loginTypeBox div[onclick="_goLogin()"]', timeout=5)
             if not unified_btn:
                 unified_btn = dp.ele('@src=img/unified_button.png', timeout=5)
@@ -184,8 +163,11 @@ def get_swu_token(username: str, password: str) -> str:
         finally:
             if dp:
                 dp.quit()
-            # 清理 Chrome 进程
-            _cleanup_chrome_processes()
+            # 清理临时目录
+            try:
+                subprocess.run(['rm', '-rf', user_data_dir], check=False)
+            except:
+                pass
             if file_path and os.path.exists(file_path):
                 os.remove(file_path)
                 try:

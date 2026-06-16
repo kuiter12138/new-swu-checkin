@@ -4,40 +4,39 @@
 import os
 import time
 import json
+import tempfile
 import ddddocr
 import requests
 from DrissionPage import ChromiumPage, ChromiumOptions
+
 MAX_RETRY = 3
 
-
 def get_swu_token(username: str, password: str, headless: bool = True) -> str:
-    """登录并获取 access_token，适配 GitHub Actions（Chrome 115）"""
+    """DrissionPage 登录，适配 GitHub Actions（Chrome 115 + 特定参数）"""
     co = ChromiumOptions()
 
     is_ci = os.environ.get('GITHUB_ACTIONS') == 'true'
     if is_ci:
-        # 指定 GitHub Actions 安装的 Chrome 路径
+        # 使用 GitHub Actions 安装的 Chrome 115
         chrome_path = os.environ.get('CHROME_PATH')
         if chrome_path:
             co.set_browser_path(chrome_path)
-        # Linux 无头必要参数
+        # Linux 无头关键参数
         co.set_argument('--no-sandbox')
         co.set_argument('--disable-dev-shm-usage')
         co.set_argument('--disable-gpu')
         co.set_argument('--disable-setuid-sandbox')
         co.set_argument('--window-size=1920,1080')
-        # 使用 DrissionPage 内置无头，不添加 --headless=new
-        co.headless = True
-        # 防止用户目录冲突
-        import tempfile
+        # 必须使用 --headless=new，这是 DrissionPage 4.1.1.4 在 Linux 下需要的
+        co.set_argument('--headless=new')
+        # 自动分配可用端口
+        co.auto_port()
+        # 使用临时用户目录，防止冲突
         co.set_user_data_path(tempfile.mkdtemp())
     else:
-        # 本地 Windows 设置
+        # 本地 Windows 保持您原有的设置
         co.headless = headless
         co.set_argument('--window-size=1920,1080')
-
-    # 自动分配可用端口，避免 9222 被占用
-    co.auto_port()
 
     last_exception = None
     file_path = None
@@ -54,7 +53,7 @@ def get_swu_token(username: str, password: str, headless: bool = True) -> str:
             )
             dp.get(login_url)
 
-            # 点击统一身份认证按钮（两种定位方式）
+            # 1. 点击统一身份认证按钮（两种定位方式）
             unified_btn = dp.ele('@src=img/unified_button.png', timeout=5)
             if not unified_btn:
                 unified_btn = dp.ele('div[onclick="_goLogin()"]', timeout=5)
@@ -62,7 +61,7 @@ def get_swu_token(username: str, password: str, headless: bool = True) -> str:
                 unified_btn.click()
                 time.sleep(2)
 
-            # 输入账号密码（优先用 class=hd，失败则用 id）
+            # 2. 输入账号密码（原逻辑：class=hd 索引，失败则用 id）
             try:
                 username_input = dp.ele('@class=hd', index=1, timeout=5)
                 password_input = dp.ele('@class=hd', index=2, timeout=5)
@@ -73,11 +72,11 @@ def get_swu_token(username: str, password: str, headless: bool = True) -> str:
             username_input.clear().input(username)
             password_input.clear().input(password)
 
-            # 验证码处理
+            # 3. 验证码处理
             os.makedirs('images', exist_ok=True)
             img = dp.ele('@id=kaptchaImage', timeout=5)
             if not img:
-                img = dp.ele('@src=validate', timeout=5)  # 备用
+                img = dp.ele('@src=validate', timeout=5)
             if not img:
                 raise Exception("未找到验证码图片")
 
@@ -92,7 +91,7 @@ def get_swu_token(username: str, password: str, headless: bool = True) -> str:
             result = ocr.classification(image_bytes)
             print(f"[尝试 {attempt}/{MAX_RETRY}] 识别验证码: {result}")
 
-            # 输入验证码
+            # 4. 输入验证码
             captcha_input = dp.ele('@class=dfinput', timeout=3)
             if not captcha_input:
                 captcha_input = dp.eles('tag=input@@type=text')[-1]
@@ -106,7 +105,7 @@ def get_swu_token(username: str, password: str, headless: bool = True) -> str:
             ''', captcha_input)
             time.sleep(0.3)
 
-            # 点击登录
+            # 5. 点击登录按钮
             login_btn = dp.ele('@style=vertical-align: top;', timeout=5)
             if not login_btn:
                 login_btn = dp.ele('.btn.btn-default.blue', timeout=5)
@@ -122,11 +121,12 @@ def get_swu_token(username: str, password: str, headless: bool = True) -> str:
                 time.sleep(1)
                 try:
                     token = dp.run_js(
-                        'return localStorage.getItem("access_token") || sessionStorage.getItem("access_token")')
+                        'return localStorage.getItem("access_token") || sessionStorage.getItem("access_token")'
+                    )
                     if token:
                         return token
                 except Exception as e:
-                    print(f"读取 token 时异常: {e}")
+                    print(f"读取 token 时异常: {e}，继续等待...")
 
                 try:
                     err = dp.ele('#err', timeout=0.2)
@@ -176,7 +176,7 @@ def checkin(token: str):
         print("❌ 今日无打卡任务")
         return False
     if task.get("qdzt") == "已签到":
-        print("✅ 今日已打卡")
+        print("✅ 今日已打卡，无需重复操作")
         return True
 
     student_id = get_student_id(token)
@@ -210,7 +210,7 @@ def main():
 
     try:
         print("开始自动登录获取 token...")
-        token = get_swu_token(username, password)
+        token = get_swu_token(username, password, headless=True)
         print(f"获取 token 成功: {token[:10]}...")
         print("正在执行打卡...")
         success = checkin(token)

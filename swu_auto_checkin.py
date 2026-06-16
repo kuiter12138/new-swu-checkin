@@ -4,64 +4,26 @@
 import os
 import time
 import json
-import subprocess
-import tempfile
-import re
 import ddddocr
 import requests
 from DrissionPage import ChromiumPage, ChromiumOptions
 
 MAX_RETRY = 3
 
-def _start_chrome_and_get_port(user_data_dir: str) -> int:
-    """启动 Chrome 并返回实际调试端口（通过 DevToolsActivePort 文件）"""
-    chrome_path = os.environ.get('CHROME_PATH', 'google-chrome')
-    cmd = [
-        chrome_path,
-        '--remote-debugging-port=0',          # 随机端口
-        f'--user-data-dir={user_data_dir}',
-        '--no-sandbox',
-        '--disable-dev-shm-usage',
-        '--disable-gpu',
-        '--disable-setuid-sandbox',
-        '--headless=new',
-        '--window-size=1920,1080',
-        '--disable-blink-features=AutomationControlled',
-        'about:blank'
-    ]
-    proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    # 等待 DevToolsActivePort 文件出现（最多 10 秒）
-    port_file = os.path.join(user_data_dir, 'DevToolsActivePort')
-    start_time = time.time()
-    while time.time() - start_time < 10:
-        if os.path.exists(port_file):
-            with open(port_file, 'r') as f:
-                lines = f.read().strip().split('\n')
-                if len(lines) >= 1:
-                    return int(lines[0])  # 第一行是端口号
-        time.sleep(0.5)
-    proc.kill()
-    raise Exception("无法获取 Chrome 调试端口")
-
 def get_swu_token(username: str, password: str) -> str:
-    """DrissionPage 登录，通过随机端口连接浏览器"""
+    """
+    使用 DrissionPage 登录，适配本地 Windows 和自托管运行器。
+    """
     last_exception = None
     file_path = None
     for attempt in range(1, MAX_RETRY + 1):
         dp = None
-        user_data_dir = tempfile.mkdtemp()
         try:
-            port = _start_chrome_and_get_port(user_data_dir)
-            print(f"Chrome 调试端口: {port}")
-
             co = ChromiumOptions()
-            co.set_local_port(port)  # 使用实际端口
-            co.set_user_data_path(user_data_dir)
-            co.headless = False      # 已连接，不自动启动
-            co.set_argument('--no-sandbox')
-            co.set_argument('--disable-dev-shm-usage')
-            co.set_argument('--disable-gpu')
             co.set_argument('--window-size=1920,1080')
+            co.headless(False)          # 本地/自托管运行器建议可见，便于调试
+            # 如果需要无头模式，可设置为 True，但某些环境下可能无法加载页面
+            # co.headless(True)
 
             dp = ChromiumPage(co)
             login_url = (
@@ -73,25 +35,28 @@ def get_swu_token(username: str, password: str) -> str:
             )
             dp.get(login_url)
 
-            # 1. 点击统一身份认证
-            unified_btn = dp.ele('#loginTypeBox div[onclick="_goLogin()"]', timeout=5)
+            # 1. 点击统一身份认证按钮
+            unified_btn = dp.ele('@src=img/unified_button.png', timeout=5)
             if not unified_btn:
-                unified_btn = dp.ele('@src=img/unified_button.png', timeout=5)
+                unified_btn = dp.ele('div[onclick="_goLogin()"]', timeout=5)
             if unified_btn:
                 unified_btn.click()
                 time.sleep(2)
 
-            # 2. 输入账号密码
-            username_input = dp.ele('#loginName', timeout=5)
-            if not username_input:
-                username_input = dp.ele('@class=hd', index=1, timeout=5)
-            password_input = dp.ele('#password', timeout=5)
-            if not password_input:
-                password_input = dp.ele('@class=hd', index=2, timeout=5)
+            # 2. 输入账号密码（原始定位方式）
+            username_input = dp.ele('@class=hd', index=1, timeout=5)
+            password_input = dp.ele('@class=hd', index=2, timeout=5)
+            if not username_input or not password_input:
+                # 备用：使用 id 定位
+                username_input = dp.ele('#loginName', timeout=5)
+                password_input = dp.ele('#password', timeout=5)
             if not username_input or not password_input:
                 raise Exception("未找到用户名或密码输入框")
-            username_input.clear().input(username)
-            password_input.clear().input(password)
+
+            username_input.clear()
+            username_input.input(username)
+            password_input.clear()
+            password_input.input(password)
 
             # 3. 验证码处理
             os.makedirs('images', exist_ok=True)
@@ -100,6 +65,7 @@ def get_swu_token(username: str, password: str) -> str:
                 img = dp.ele('@src=validate', timeout=5)
             if not img:
                 raise Exception("未找到验证码图片")
+
             file_path = 'images/captcha.png'
             if os.path.exists(file_path):
                 os.remove(file_path)
@@ -111,7 +77,7 @@ def get_swu_token(username: str, password: str) -> str:
             result = ocr.classification(image_bytes)
             print(f"[尝试 {attempt}/{MAX_RETRY}] 识别验证码: {result}")
 
-            # 4. 输入验证码并触发事件
+            # 4. 输入验证码并触发事件（关键步骤）
             captcha_input = dp.ele('@class=dfinput', timeout=3)
             if not captcha_input:
                 captcha_input = dp.eles('tag=input@@type=text')[-1]
@@ -148,6 +114,7 @@ def get_swu_token(username: str, password: str) -> str:
                         return token
                 except Exception as e:
                     print(f"读取 token 时异常: {e}")
+
                 err = dp.ele('#err', timeout=0.2)
                 if err and ('验证码错误' in err.text or '验证码不正确' in err.text):
                     print("验证码错误，准备重试...")
@@ -163,11 +130,6 @@ def get_swu_token(username: str, password: str) -> str:
         finally:
             if dp:
                 dp.quit()
-            # 清理临时目录
-            try:
-                subprocess.run(['rm', '-rf', user_data_dir], check=False)
-            except:
-                pass
             if file_path and os.path.exists(file_path):
                 os.remove(file_path)
                 try:

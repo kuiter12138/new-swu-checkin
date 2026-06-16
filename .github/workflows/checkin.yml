@@ -2,8 +2,7 @@ name: SWU Daily Checkin
 
 on:
   schedule:
-    # 北京时间 21:30 -> UTC 13:30
-    - cron: '30 13 * * *'
+    - cron: '30 13 * * *'   # 北京时间 21:30
   workflow_dispatch:
 
 jobs:
@@ -13,6 +12,11 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Setup Chrome
+        uses: browser-actions/setup-chrome@v1
+        with:
+          chrome-version: stable
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -21,7 +25,6 @@ jobs:
       - name: Install dependencies
         run: |
           pip install -r requirements.txt
-          playwright install chromium
 
       - name: Run checkin script
         env:

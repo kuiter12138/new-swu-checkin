@@ -3,7 +3,7 @@ name: SWU Daily Checkin
 on:
   schedule:
     - cron: '30 13 * * *'   # 北京时间 21:30
-    - cron: '35 14 * * *'   # 北京时间 22:35
+    - cron: '43 14 * * *'   # 北京时间 22:35
   workflow_dispatch:
 
 jobs:

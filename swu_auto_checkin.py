@@ -8,7 +8,6 @@ import argparse
 import subprocess
 import urllib.parse
 import socket
-import requests
 import ddddocr
 from DrissionPage import ChromiumPage, ChromiumOptions
 
@@ -44,7 +43,27 @@ def get_available_port():
         s.bind(('127.0.0.1', 0))
         return s.getsockname()[1]
 
-def get_swu_token(username: str, password: str, headless: bool = False, max_retries: int = 3) -> str:
+# ---------- 浏览器内 fetch 通用函数 ----------
+def fetch_in_browser(dp, url, method='GET', headers=None, body=None):
+    """在浏览器页面上下文中执行 fetch，返回响应 JSON 对象"""
+    js_code = f'''
+    (async () => {{
+        const options = {{
+            method: '{method}',
+            headers: {json.dumps(headers) if headers else '{}'},
+        }};
+        if (options.method !== 'GET' && options.method !== 'HEAD') {{
+            options.body = {json.dumps(body) if body else 'undefined'};
+        }}
+        const resp = await fetch('{url}', options);
+        if (!resp.ok) throw new Error('HTTP ' + resp.status);
+        return await resp.json();
+    }})()
+    '''
+    return dp.run_js(js_code)
+
+# ---------- 登录模块（返回 token 和浏览器对象） ----------
+def get_swu_token(username: str, password: str, headless: bool = False, max_retries: int = 3):
     chrome_path = get_chrome_path()
     print(f"✅ 使用 Chrome: {chrome_path}")
 
@@ -107,10 +126,6 @@ def get_swu_token(username: str, password: str, headless: bool = False, max_retr
                 time.sleep(3)
                 print(f"跳转后标题: {dp.title}")
                 print(f"跳转后URL: {dp.url}")
-
-            # 注释掉清除 cookies 的逻辑，避免干扰
-            # if 'authorize' in dp.url or ('oauth2' in dp.url and 'Login' not in dp.url):
-            #     ...
 
             if 'Login' not in dp.url:
                 print("未进入登录页，尝试直接访问基础登录页...")
@@ -205,7 +220,6 @@ def get_swu_token(username: str, password: str, headless: bool = False, max_retr
             time.sleep(0.3)
             print("✅ 已输入验证码")
 
-            # 点击登录按钮（增强版）
             login_btn = dp.ele('@style=vertical-align: top;', timeout=3)
             if not login_btn:
                 login_btn = dp.ele('.btn.btn-default.blue', timeout=3)
@@ -251,15 +265,14 @@ def get_swu_token(username: str, password: str, headless: bool = False, max_retr
                 ''')
                 if token:
                     print("✅ 从 localStorage/sessionStorage 获取 token 成功")
-                    dp.quit()
+                    # 清理验证码图片
                     if os.path.exists(file_path):
                         os.remove(file_path)
                         try:
                             os.rmdir('images')
                         except:
                             pass
-                    return token
-
+                    return token, dp  # 返回浏览器对象
                 current_url = dp.url
                 if 'code=' in current_url:
                     parsed = urllib.parse.urlparse(current_url)
@@ -267,16 +280,12 @@ def get_swu_token(username: str, password: str, headless: bool = False, max_retr
                     if 'code' in params:
                         token = params['code'][0]
                         print(f"✅ 从 URL 获取 code: {token}")
-                        dp.quit()
-                        return token
-
+                        return token, dp
                 for cookie in dp.cookies():
                     if 'token' in cookie['name'].lower() or 'access' in cookie['name'].lower():
                         token = cookie['value']
                         print(f"✅ 从 cookie 获取 token: {cookie['name']}")
-                        dp.quit()
-                        return token
-
+                        return token, dp
                 if i % 10 == 0:
                     print(f"当前 URL ({i*0.5}s): {current_url[:100]}...")
 
@@ -299,25 +308,23 @@ def get_swu_token(username: str, password: str, headless: bool = False, max_retr
 
     raise Exception(f"登录失败，已重试 {max_retries} 次。")
 
-# 后面的 get_transition_today, get_student_id, checkin, main 保持不变
-
-# ==================== 打卡模块（保持不变） ====================
-def get_transition_today(token: str):
+# ---------- 打卡模块（全部改用浏览器内 fetch） ----------
+def get_transition_today(token, dp):
     url = "https://of.swu.edu.cn/gateway/fighter-baida/api/cqtj/getTransitionByToday"
     headers = {"fighter-auth-token": token}
     data = {"pageNum": 1, "pageSize": 1}
-    resp = requests.post(url, headers=headers, data=data).json()
-    records = resp.get("data", {}).get("records", [])
-    return records[0] if records else None
+    return fetch_in_browser(dp, url, method='POST', headers=headers, body=data)
 
-def get_student_id(token: str):
+def get_student_id(token, dp):
     url = "https://of.swu.edu.cn/gateway/fighter-middle/api/auth/user?appType=fighter-portal"
     headers = {"fighter-auth-token": token}
-    resp = requests.get(url, headers=headers).json()
-    return resp["data"]["subject"]["username"]
+    return fetch_in_browser(dp, url, method='GET', headers=headers)
 
-def checkin(token: str, time_range: list):
-    task = get_transition_today(token)
+def checkin(token, time_range, dp):
+    # 获取今日任务
+    resp = get_transition_today(token, dp)
+    records = resp.get("data", {}).get("records", [])
+    task = records[0] if records else None
     if not task:
         print("❌ 今日无打卡任务")
         return False
@@ -325,7 +332,9 @@ def checkin(token: str, time_range: list):
         print("✅ 今日已打卡，无需重复")
         return True
 
-    student_id = get_student_id(token)
+    # 获取学号
+    user_info = get_student_id(token, dp)
+    student_id = user_info["data"]["subject"]["username"]
     print(f"当前用户学号: {student_id}")
 
     formid = task["formId"]
@@ -343,59 +352,59 @@ def checkin(token: str, time_range: list):
         "xh": student_id,
         "qdsj": time_range,
     }
-
-    resp = requests.post(url, headers=headers, params=params, data=json.dumps(payload)).json()
-    if resp.get("code") == 200 and resp.get("data"):
+    save_resp = fetch_in_browser(dp, url, method='POST', headers=headers, body=payload)
+    if save_resp.get("code") == 200 and save_resp.get("data"):
         print("✅ 打卡成功！")
         return True
     else:
-        print(f"❌ 打卡失败: {resp.get('msg', '未知错误')}")
+        print(f"❌ 打卡失败: {save_resp.get('msg', '未知错误')}")
         return False
 
-# ==================== 主程序 ====================
+# ---------- 主程序 ----------
 def main():
     parser = argparse.ArgumentParser(description='西南大学自动打卡（含自动登录）')
     parser.add_argument('--no-headless', action='store_true', help='禁用无头模式（显示浏览器）')
     args = parser.parse_args()
     headless_mode = not args.no_headless
 
-    # 从环境变量读取账号密码
     username = os.environ.get('SWU_USERNAME')
     password = os.environ.get('SWU_PASSWORD')
     if not username or not password:
         raise Exception("❌ 请设置环境变量 SWU_USERNAME 和 SWU_PASSWORD")
 
-    # 获取 token
     token = MANUAL_TOKEN.strip()
+    dp = None
     if not token:
         print("未指定手动 token，将自动登录获取...")
         try:
-            token = get_swu_token(username, password, headless=headless_mode)
+            token, dp = get_swu_token(username, password, headless=headless_mode)
             print(f"\n✅ 获取到的 token: {token[:20]}...")
         except Exception as e:
             print(f"❌ 自动登录失败: {e}")
             return
     else:
         print(f"使用手动指定的 token: {token[:20]}...")
-        try:
-            get_student_id(token)
-            print("✅ 手动 token 有效")
-        except:
-            print("⚠️ 手动 token 无效，尝试自动登录获取...")
-            try:
-                token = get_swu_token(username, password, headless=headless_mode)
-                print(f"\n✅ 获取到的 token: {token[:20]}...")
-            except Exception as e:
-                print(f"❌ 自动登录失败: {e}")
-                return
+        # 手动 token 无法复用浏览器，只能依赖外部网络（大概率超时）
+        # 建议不用手动 token
+        return
 
-    # 执行打卡
     print("\n--- 开始打卡 ---")
-    success = checkin(token, CHECKIN_TIME_RANGE)
-    if success:
-        print("打卡流程完成。")
-    else:
-        print("打卡失败，请检查网络或 token 状态。")
+    try:
+        success = checkin(token, CHECKIN_TIME_RANGE, dp)
+        if success:
+            print("打卡流程完成。")
+        else:
+            print("打卡失败，请检查网络或 token 状态。")
+    finally:
+        if dp:
+            dp.quit()
+            # 清理可能的验证码残留
+            if os.path.exists('images/captcha.png'):
+                os.remove('images/captcha.png')
+                try:
+                    os.rmdir('images')
+                except:
+                    pass
 
 if __name__ == "__main__":
     main()

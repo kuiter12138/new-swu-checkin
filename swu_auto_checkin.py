@@ -12,49 +12,38 @@ import requests
 import ddddocr
 from DrissionPage import ChromiumPage, ChromiumOptions
 
-# ==================== 配置区 ====================
-MANUAL_TOKEN = ""  # 留空则自动登录
+MANUAL_TOKEN = ""
 CHECKIN_TIME_RANGE = ["21:00", "23:30"]
 
-# ==================== 工具函数 ====================
 def get_chrome_path():
-    """获取 Chrome 路径（兼容 GitHub Actions Linux 和 Windows）"""
-    # 优先使用环境变量（由 setup-chrome 设置）
     chrome_path = os.environ.get('CHROME_PATH')
     if chrome_path and os.path.isfile(chrome_path):
         return chrome_path
-    # Linux 常见路径
     for path in [
-        '/usr/bin/google-chrome',
-        '/usr/bin/chromium-browser',
-        '/usr/bin/chromium',
+        '/usr/bin/google-chrome', '/usr/bin/chromium-browser', '/usr/bin/chromium',
         '/opt/google/chrome/chrome',
     ]:
         if os.path.isfile(path):
             return path
-    # Windows 路径（备用）
     for path in [
         r"C:\Program Files\Google\Chrome\Application\chrome.exe",
         r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
     ]:
         if os.path.isfile(path):
             return path
-    # 尝试 where/which 命令
     try:
         result = subprocess.run(['which', 'google-chrome'], capture_output=True, text=True)
         if result.returncode == 0 and os.path.isfile(result.stdout.strip()):
             return result.stdout.strip()
     except:
         pass
-    raise Exception("❌ 未找到 Chrome 浏览器，请设置 CHROME_PATH 环境变量")
+    raise Exception("❌ 未找到 Chrome 浏览器")
 
 def get_available_port():
-    """获取可用端口"""
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.bind(('127.0.0.1', 0))
         return s.getsockname()[1]
 
-# ==================== 登录模块 ====================
 def get_swu_token(username: str, password: str, headless: bool = False, max_retries: int = 3) -> str:
     chrome_path = get_chrome_path()
     print(f"✅ 使用 Chrome: {chrome_path}")
@@ -64,23 +53,19 @@ def get_swu_token(username: str, password: str, headless: bool = False, max_retr
         co = ChromiumOptions()
         co.set_paths(browser_path=chrome_path)
 
-        # 判断是否在 CI 环境（GitHub Actions 会设置 GITHUB_ACTIONS=true）
         is_ci = os.environ.get('GITHUB_ACTIONS') == 'true'
         if headless or is_ci:
-            # 无头模式 / CI 环境专用参数
-            co.set_argument('--headless=new')          # 新版无头模式，兼容性更好
+            co.set_argument('--headless=new')
             co.set_argument('--no-sandbox')
             co.set_argument('--disable-dev-shm-usage')
             co.set_argument('--disable-gpu')
             co.set_argument('--window-size=1920,1080')
             co.set_argument('--disable-blink-features=AutomationControlled')
             co.set_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
-            # 使用随机端口避免冲突
             debug_port = get_available_port()
             co.set_argument(f'--remote-debugging-port={debug_port}')
             co.set_user_data_path(os.path.join(os.getcwd(), 'chrome_user_data_ci'))
         else:
-            # 本地有头模式
             co.auto_port(True)
             co.set_argument('--window-size=1920,1080')
             co.set_argument('--no-sandbox')
@@ -97,8 +82,6 @@ def get_swu_token(username: str, password: str, headless: bool = False, max_retr
         except Exception as e:
             print(f"❌ 浏览器启动失败: {e}")
             if headless or is_ci:
-                print("尝试以非无头模式重试...")
-                # 回退到可见模式（可能需要 display，CI 下仍会失败，但可尝试）
                 co = ChromiumOptions()
                 co.set_paths(browser_path=chrome_path)
                 co.auto_port(True)
@@ -112,13 +95,11 @@ def get_swu_token(username: str, password: str, headless: bool = False, max_retr
                 raise
 
         try:
-            # ---------- 访问登录页 ----------
             login_url = 'https://of.swu.edu.cn/cas/oauth/login/SWU_CAS2_FEDERAL?service=https%3A%2F%2Fof.swu.edu.cn%2Fgateway%2Ffighter-middle%2Fapi%2Fintegrate%2Fuaap%2Fcas%2Fresolve-cas-return%3Fnext%3Dhttps%253A%252F%252Fof.swu.edu.cn%252F%2523%252FcasLogin%253Ffrom%253D%25252FappCenter'
             dp.get(login_url)
             print(f"当前页面标题: {dp.title}")
             print(f"当前URL: {dp.url}")
 
-            # 点击统一身份认证
             unified_btn = dp.ele('@src=img/unified_button.png', timeout=5)
             if unified_btn:
                 unified_btn.click()
@@ -127,14 +108,10 @@ def get_swu_token(username: str, password: str, headless: bool = False, max_retr
                 print(f"跳转后标题: {dp.title}")
                 print(f"跳转后URL: {dp.url}")
 
-            # 处理可能已登录的状态
-            if 'authorize' in dp.url or ('oauth2' in dp.url and 'Login' not in dp.url):
-                print("检测到已登录状态，清除 cookies 并刷新...")
-                dp.run_js('document.cookie.split(";").forEach(c => document.cookie = c.replace(/^ +/, "").replace(/=.*/, "=;expires=" + new Date().toUTCString() + ";path=/"));')
-                dp.refresh()
-                time.sleep(3)
+            # 注释掉清除 cookies 的逻辑，避免干扰
+            # if 'authorize' in dp.url or ('oauth2' in dp.url and 'Login' not in dp.url):
+            #     ...
 
-            # 确保进入登录表单
             if 'Login' not in dp.url:
                 print("未进入登录页，尝试直接访问基础登录页...")
                 dp.get('https://idm.swu.edu.cn/am/UI/Login')
@@ -144,14 +121,12 @@ def get_swu_token(username: str, password: str, headless: bool = False, max_retr
             print("等待登录表单加载...")
             time.sleep(1)
 
-            # 处理 iframe
             iframes = dp.eles('tag:iframe', timeout=3)
             if iframes:
                 print(f"发现 {len(iframes)} 个 iframe，尝试切换到第一个")
                 dp.to_frame(iframes[0])
                 time.sleep(1)
 
-            # ---------- 填写用户名 ----------
             username_input = dp.ele('@name=username', timeout=3) or dp.ele('@name=j_username', timeout=3)
             if not username_input:
                 inputs = dp.eles('tag:input@type=text', timeout=3)
@@ -162,7 +137,6 @@ def get_swu_token(username: str, password: str, headless: bool = False, max_retr
             username_input.clear().input(username)
             print("✅ 已输入用户名")
 
-            # ---------- 填写密码 ----------
             password_input = dp.ele('@name=password', timeout=3) or dp.ele('@name=j_password', timeout=3)
             if not password_input:
                 inputs = dp.eles('tag:input@type=password', timeout=3)
@@ -173,7 +147,6 @@ def get_swu_token(username: str, password: str, headless: bool = False, max_retr
             password_input.clear().input(password)
             print("✅ 已输入密码")
 
-            # ---------- 验证码处理 ----------
             print("正在获取验证码...")
             time.sleep(0.5)
             img = dp.ele('@id=kaptchaImage', timeout=5) or dp.ele('@src=/am/validate.code', timeout=5)
@@ -200,7 +173,6 @@ def get_swu_token(username: str, password: str, headless: bool = False, max_retr
             result = ocr.classification(image_bytes)
             print(f"识别到的验证码: {result}")
 
-            # ---------- 填写验证码 ----------
             captcha_input = dp.ele('@name=captcha', timeout=3) or dp.ele('@name=verificationCode', timeout=3)
             if not captcha_input:
                 inputs = dp.eles('tag:input@type=text', timeout=3)
@@ -222,7 +194,6 @@ def get_swu_token(username: str, password: str, headless: bool = False, max_retr
                 username_input.click()
             dp.actions.wait(0.2)
 
-            # 触发前端事件
             dp.run_js('''
                 var el = arguments[0];
                 el.dispatchEvent(new Event('input', { bubbles: true }));
@@ -234,7 +205,7 @@ def get_swu_token(username: str, password: str, headless: bool = False, max_retr
             time.sleep(0.3)
             print("✅ 已输入验证码")
 
-            # ---------- 点击登录 ----------
+            # 点击登录按钮（增强版）
             login_btn = dp.ele('@style=vertical-align: top;', timeout=3)
             if not login_btn:
                 login_btn = dp.ele('.btn.btn-default.blue', timeout=3)
@@ -244,10 +215,10 @@ def get_swu_token(username: str, password: str, headless: bool = False, max_retr
                 login_btn = dp.ele('text=登录', timeout=3)
             if not login_btn:
                 raise Exception("❌ 未找到登录按钮")
-            login_btn.click()
+
+            dp.actions.move_to(login_btn).click().wait(0.5)
             print("✅ 已点击登录按钮")
 
-            # ---------- 登录后处理 ----------
             time.sleep(3)
             error_msgs = dp.eles('.error, #err, .msg-error, .alert-danger', timeout=1)
             if error_msgs:
@@ -255,27 +226,21 @@ def get_swu_token(username: str, password: str, headless: bool = False, max_retr
                     print(f"⚠️ 错误信息: {e.text}")
                 raise Exception(f"登录失败: {error_msgs[0].text}")
 
-            if 'Login' in dp.url:
-                print("⚠️ 页面仍停留在登录页，尝试额外操作...")
-                checkbox = dp.ele('input[type="checkbox"]', timeout=1)
-                if checkbox and not checkbox.is_checked():
-                    checkbox.click()
-                    time.sleep(0.5)
-                    login_btn.click()
-                    time.sleep(3)
-                    if 'Login' not in dp.url:
-                        print("✅ 勾选复选框后登录成功")
-                    else:
-                        raise Exception("登录失败，可能是验证码错误")
-                else:
-                    dp.run_js('document.forms[0].submit();')
-                    time.sleep(2)
-                    if 'Login' in dp.url:
-                        raise Exception("登录失败，可能是验证码错误或账号密码不正确")
-                    else:
-                        print("✅ 表单直接提交成功")
+            if 'Login' in dp.url or 'idm.swu.edu.cn' in dp.url:
+                print("⚠️ 页面未跳转，尝试使用 JavaScript 触发按钮...")
+                dp.run_js('''
+                    var btn = document.querySelector('[style*="vertical-align: top"]');
+                    if (!btn) btn = document.querySelector('.btn.btn-default.blue');
+                    if (!btn) btn = document.querySelector('input[type="submit"]');
+                    if (btn) {
+                        btn.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+                    }
+                ''')
+                time.sleep(3)
+                if 'Login' in dp.url or 'idm.swu.edu.cn' in dp.url:
+                    raise Exception("登录失败，可能是验证码错误或账号密码不正确")
 
-            # ---------- 获取 token ----------
+            # 获取 token
             for i in range(60):
                 time.sleep(0.5)
                 token = dp.run_js('''
@@ -333,6 +298,8 @@ def get_swu_token(username: str, password: str, headless: bool = False, max_retr
                 time.sleep(2)
 
     raise Exception(f"登录失败，已重试 {max_retries} 次。")
+
+# 后面的 get_transition_today, get_student_id, checkin, main 保持不变
 
 # ==================== 打卡模块（保持不变） ====================
 def get_transition_today(token: str):

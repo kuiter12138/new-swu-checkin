@@ -1,7 +1,4 @@
 ddddocr>=1.4.11
 requests>=2.28
 DrissionPage>=4.0.4
-onnxruntimeddddocr>=1.4.11
-requests>=2.28
-DrissionPage>=4.1.0
 onnxruntime
